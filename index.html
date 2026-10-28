@@ -1,0 +1,75 @@
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Airy Softphone</title>
+<style>
+:root{--bg:#0f1115;--panel:#181b22;--fg:#e8eaf0;--muted:#9aa1b2;--accent:#4f8cff;--good:#2fb37a;--bad:#e5484d;--line:#2a2f3a}
+@media (prefers-color-scheme: light){:root{--bg:#f6f7f9;--panel:#fff;--fg:#14161b;--muted:#5d6475;--line:#dde1e8}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:flex;justify-content:center;padding:24px 16px}
+.wrap{width:100%;max-width:380px}.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px}
+h1{font-size:20px;margin:0 0 4px}.num{color:var(--muted);margin-bottom:16px}
+.status{font-size:15px;margin:12px 0;min-height:22px}.timer{font:600 32px/1 ui-monospace,Menlo,monospace;margin:8px 0 16px}
+button{font:inherit;font-weight:600;border:1px solid var(--line);background:var(--panel);color:var(--fg);border-radius:10px;padding:12px;cursor:pointer}
+button:disabled{opacity:.4;cursor:default}.big{width:100%;padding:14px;font-size:17px}
+.call{background:var(--good);border-color:var(--good);color:#fff}.hang{background:var(--bad);border-color:var(--bad);color:#fff}
+.row{display:flex;gap:8px;margin-top:8px}.row button{flex:1}
+.pad{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:12px}.pad button{padding:10px}
+.note{color:var(--muted);font-size:13px;margin-top:14px}
+</style></head><body><div class="wrap"><div class="card">
+<h1 id="label">Загрузка…</h1><div class="num" id="num"></div>
+<button class="big call" id="go" disabled>Позвонить с ПК</button>
+<div class="status" id="st"></div><div class="timer" id="tm">0:00</div>
+<div class="row"><button id="mute" disabled>Без звука</button><button class="hang" id="end" disabled>Положить трубку</button></div>
+<div class="pad" id="pad"></div>
+<div class="note" id="note">Звонок идёт с компьютера, у них на экране +1 610-200-2093. Нужна гарнитура: со встроенным микрофоном ноутбука будет эхо. Разговор не записывается. После звонка вернись в очередь и отметь итог.</div>
+</div></div>
+<script src="https://cdn.jsdelivr.net/npm/@twilio/voice-sdk@2.18.5/dist/twilio.min.js"></script>
+<script>
+const $ = id => document.getElementById(id), t = new URLSearchParams(location.search).get('t') || '';
+let device = null, call = null, started = 0, tick = null;
+const st = s => $('st').textContent = s;
+const fmt = s => Math.floor(s/60) + ':' + String(s%60).padStart(2,'0');
+'123456789*0#'.split('').forEach(d => { const b = document.createElement('button'); b.textContent = d; b.disabled = true; b.onclick = () => call && call.sendDigits(d); $('pad').appendChild(b); });
+const padOn = on => $('pad').querySelectorAll('button').forEach(b => b.disabled = !on);
+function done(msg){
+  clearInterval(tick); call = null; padOn(false);
+  $('mute').disabled = $('end').disabled = true; $('mute').textContent = 'Без звука';
+  $('go').disabled = false; $('go').textContent = 'Позвонить ещё раз';
+  st(msg + (started ? ' · разговор ' + fmt(Math.round((Date.now()-started)/1000)) : '') + '. Отметь итог в очереди.');
+  started = 0;
+}
+(async () => {
+  if (!window.Twilio){ $('label').textContent = 'Не загрузился Twilio SDK'; return; }
+  const r = await fetch('https://n8n.airysolutions.com/webhook/airy-softphone-token?t=' + encodeURIComponent(t)).then(r => r.json()).catch(() => ({}));
+  if (!r.ok){ $('label').textContent = 'Ссылка устарела'; st('Открой карточку в очереди заново.'); return; }
+  $('label').textContent = r.label; $('num').textContent = r.number;
+  device = new Twilio.Device(r.token, { edge: ['frankfurt', 'dublin'], codecPreferences: ['opus', 'pcmu'], closeProtection: 'Идёт звонок. Закрыть страницу?' });
+  device.on('error', e => st('Ошибка: ' + (e.message || e.code)));
+  $('go').disabled = false;
+})();
+$('go').onclick = async () => {
+  $('go').disabled = true; st('Проверяю микрофон…'); $('tm').textContent = '0:00';
+  // Ask for the mic ourselves first: the SDK's 31402 says nothing about why the browser refused.
+  if (/Electron|Claude/i.test(navigator.userAgent)){ st('Это встроенный браузер приложения, микрофона в нём нет. Скопируй адрес и открой в Chrome.'); $('go').disabled = false; return; }
+  try { (await navigator.mediaDevices.getUserMedia({ audio: true })).getTracks().forEach(x => x.stop()); }
+  catch (e) {
+    st({ NotAllowedError: 'Микрофон запрещён. Нажми на значок замка слева от адреса → Микрофон → Разрешить, и обнови страницу. Если разрешено, а не работает: Системные настройки macOS → Конфиденциальность и безопасность → Микрофон → включи свой браузер, затем перезапусти его.',
+         NotFoundError: 'Микрофон не найден. Подключи гарнитуру и обнови страницу.',
+         NotReadableError: 'Микрофон занят или запрещён в macOS: Системные настройки → Конфиденциальность и безопасность → Микрофон → включи браузер и перезапусти его. Закрой Zoom/FaceTime, если открыты.' }[e.name] || ('Микрофон недоступен: ' + e.name + ' ' + (e.message || '')));
+    $('go').disabled = false; return;
+  }
+  st('Соединяю…');
+  try { call = await device.connect({ params: { t } }); }
+  catch (e) { st('Не удалось позвонить: ' + (e.message || e)); $('go').disabled = false; return; }
+  $('end').disabled = false;
+  call.on('ringing', () => st('Идёт вызов…'));
+  call.on('accept', () => { st('Разговор'); started = Date.now(); $('mute').disabled = false; padOn(true);
+    tick = setInterval(() => $('tm').textContent = fmt(Math.round((Date.now()-started)/1000)), 500); });
+  call.on('disconnect', () => done('Звонок завершён'));
+  call.on('cancel', () => done('Отменён'));
+  call.on('reject', () => done('Отклонён'));
+  call.on('error', e => st('Ошибка звонка: ' + (e.message || e.code)));
+  call.on('warning', name => /mos|rtt|jitter|packet/i.test(name) && st('Разговор · связь проседает'));
+  call.on('warning-cleared', () => started && st('Разговор'));
+};
+$('end').onclick = () => call && call.disconnect();
+$('mute').onclick = () => { if (!call) return; call.mute(!call.isMuted()); $('mute').textContent = call.isMuted() ? 'Включить звук' : 'Без звука'; };
+</script></body></html>
